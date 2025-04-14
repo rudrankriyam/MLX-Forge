@@ -1,2 +1,2 @@
-# MLX-Forge
+# MLX Forge
 A pretty macOS app for MLX
