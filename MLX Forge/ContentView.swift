@@ -12,16 +12,14 @@ import AppKit // ADD: Import AppKit for NSPasteboard
 struct ContentView: View {
     @State private var inputRepo = ""
     @State private var outputRepo = ""
-    @State private var shouldQuantize = true
+    @State private var quantizationLevel: String = "4-bit" // Default to 4-bit
+    let quantizationOptions = ["None", "4-bit", "8-bit"]
     @State private var outputLog = "Process output will appear here..."
     @State private var isRunning = false
-    // Keep pythonPath, make it configurable later
-    @State private var pythonPath = "/usr/bin/env" // Default, user might override
-
-    // ADD: State for environment check results
-    @State private var isEnvironmentValid: Bool? = nil // nil = not checked, true = valid, false = invalid
+    @State private var pythonPath = "/usr/local/bin/python3" // Default, user might override
+    @State private var isEnvironmentValid: Bool? = nil
     @State private var environmentStatusMessage = "Checking Python environment..."
-    @State private var isSettingUpEnvironment = false // ADD: State for setup process
+    @State private var isSettingUpEnvironment = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
@@ -67,7 +65,6 @@ struct ContentView: View {
 
             GroupBox("Configuration") {
                 VStack(alignment: .leading) {
-                    // TODO: Add TextField for Python Path later
                     HStack {
                         Text("Input Repo ID:")
                         TextField("e.g., mistralai/Mistral-7B-v0.1", text: $inputRepo)
@@ -76,31 +73,55 @@ struct ContentView: View {
                         Text("Output Repo ID:")
                         TextField("Optional: e.g., your-username/Mistral-7B-v0.1-mlx", text: $outputRepo)
                     }
-                    Toggle("Quantize Model (-q)", isOn: $shouldQuantize)
+                    Picker("Quantization:", selection: $quantizationLevel) {
+                        ForEach(quantizationOptions, id: \.self) { level in
+                            Text(level)
+                        }
+                    }
+                    .pickerStyle(.segmented) // Or .menu for dropdown
+
                     HStack {
                         Text("Python Path:")
-                        TextField("e.g., /usr/bin/python3", text: $pythonPath)
-                            .disabled(isRunning || isSettingUpEnvironment) // ADD: Disable during setup
+                        TextField("e.g., /usr/local/bin/python3", text: $pythonPath)
+                            .disabled(isRunning || isSettingUpEnvironment)
                     }
                 }
                 .padding(.vertical, 5)
             }
 
-            Button(action: {
-                runConversion() // Use the Process-based function
-            }) {
-                HStack {
-                    if isRunning {
-                        ProgressView()
-                            .controlSize(.small)
+            HStack {
+                // Convert Button (Local)
+                Button(action: {
+                    runConversion(upload: false) // Call with upload: false
+                }) {
+                    HStack {
+                        if isRunning { // Show progress if either is running
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(isRunning ? "Working..." : "Convert")
                     }
-                    Text(isRunning ? "Converting..." : "Convert and Upload")
+                    .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: .infinity)
+                .buttonStyle(.bordered) // Use bordered for secondary action
+                .disabled(inputRepo.isEmpty || isRunning || isEnvironmentValid != true || isSettingUpEnvironment)
+                .help("Convert the Hugging Face model to MLX format locally.")
+
+                // Convert and Upload Button
+                Button(action: {
+                    runConversion(upload: true) // Call with upload: true
+                }) {
+                    HStack {
+                        if isRunning { // Show progress if either is running
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(isRunning ? "Working..." : "Convert and Upload")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent) // Use prominent for primary action
+                .disabled(inputRepo.isEmpty || outputRepo.isEmpty || isRunning || isEnvironmentValid != true || isSettingUpEnvironment) // Also disable if outputRepo is empty
+                .help("Convert the model and upload it to the specified Hugging Face repo.")
             }
-            .buttonStyle(.borderedProminent)
-            // CHANGE: Disable if environment isn't valid OR already running OR no input
-            .disabled(inputRepo.isEmpty || isRunning || isEnvironmentValid != true || isSettingUpEnvironment) // ADD: Disable during setup
 
             GroupBox("Logs") {
                 TextEditor(text: $outputLog)
@@ -140,7 +161,7 @@ struct ContentView: View {
         }
     }
 
-    func buildArguments() -> [String] {
+    func buildArguments(upload: Bool) -> [String] {
         var args = [String]()
         let pythonExecutable = pythonPath == "/usr/bin/env" ? "python3" : pythonPath
 
@@ -154,11 +175,23 @@ struct ContentView: View {
         args.append("--hf-path")
         args.append(inputRepo)
 
-        if shouldQuantize {
-            args.append("-q")
+        // CHANGE: Add quantization arguments based on selection
+        if quantizationLevel != "None" {
+            args.append("-q") // Enable quantization
+            if quantizationLevel == "4-bit" {
+                args.append("--q-bits")
+                args.append("4")
+                // args.append("--q-group-size") // Optional: Specify default group size
+                // args.append("64")
+            } else if quantizationLevel == "8-bit" {
+                args.append("--q-bits")
+                args.append("8")
+                // args.append("--q-group-size") // Optional: Specify default group size
+                // args.append("64")
+            }
         }
 
-        if !outputRepo.isEmpty {
+        if upload && !outputRepo.isEmpty {
             args.append("--upload-repo")
             args.append(outputRepo)
         }
@@ -166,31 +199,41 @@ struct ContentView: View {
         return args
     }
 
-    func runConversion() {
+    func runConversion(upload: Bool) {
         guard isEnvironmentValid == true else {
             outputLog = "Cannot run conversion, Python environment is not valid.\n\(environmentStatusMessage)"
             return
         }
 
+        // ADD: Check if output repo is provided when uploading
+        if upload && outputRepo.isEmpty {
+            outputLog = "ERROR: Output Repo ID cannot be empty when uploading."
+            return
+        }
+
         isRunning = true
-        outputLog = "Starting conversion...\n"
+        outputLog = "Starting \(upload ? "conversion and upload" : "conversion")...\n"
 
         let task = Process()
         var processArguments: [String]
 
         if pythonPath == "/usr/bin/env" {
             task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            processArguments = buildArguments() // Includes 'python3'
+            // CHANGE: Pass upload flag
+            processArguments = buildArguments(upload: upload) // Includes 'python3'
         } else {
-            // Ensure the path is valid before trying to use it
             guard FileManager.default.fileExists(atPath: pythonPath) else {
                  outputLog = "ERROR: Specified Python path does not exist: \(pythonPath)"
                  isRunning = false
                  return
             }
             task.executableURL = URL(fileURLWithPath: pythonPath)
+            // CHANGE: Pass upload flag and adjust dropFirst logic if needed
             // Exclude 'python3' from buildArguments if path is direct
-            processArguments = buildArguments().dropFirst().compactMap { $0 }
+            processArguments = buildArguments(upload: upload)
+            if pythonPath != "/usr/bin/env" && processArguments.first == "python3" { // Check if buildArguments added python3 unnecessarily
+                 processArguments = Array(processArguments.dropFirst())
+            }
         }
         task.arguments = processArguments
         outputLog += "Running: \(task.executableURL?.path ?? "unknown") \(processArguments.joined(separator: " "))\n\n"
@@ -228,10 +271,11 @@ struct ContentView: View {
                 outputHandle.readabilityHandler = nil
                 errorHandle.readabilityHandler = nil
 
+                let baseMessage = upload ? "Conversion and Upload" : "Conversion"
                 if process.terminationStatus == 0 {
-                     self.outputLog += "\n\nConversion and Upload Successful!"
+                     self.outputLog += "\n\n\(baseMessage) Successful!"
                 } else {
-                    self.outputLog += "\n\nProcess failed with status: \(process.terminationStatus)"
+                    self.outputLog += "\n\n\(baseMessage) failed with status: \(process.terminationStatus)"
                 }
                 self.isRunning = false
             }
