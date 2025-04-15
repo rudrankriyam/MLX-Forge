@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Foundation // Keep Foundation for Process
+import AppKit // ADD: Import AppKit for NSPasteboard
 
 struct ContentView: View {
     @State private var inputRepo = ""
@@ -20,13 +21,11 @@ struct ContentView: View {
     // ADD: State for environment check results
     @State private var isEnvironmentValid: Bool? = nil // nil = not checked, true = valid, false = invalid
     @State private var environmentStatusMessage = "Checking Python environment..."
+    @State private var isSettingUpEnvironment = false // ADD: State for setup process
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
-            Text("MLX Model Conversion")
-                .font(.title)
-
-            // ADD: Environment Status Display
+            // Environment Status Display
             HStack {
                 if isEnvironmentValid == nil {
                     ProgressView().controlSize(.small)
@@ -47,12 +46,21 @@ struct ContentView: View {
                 }
                 Spacer() // Push status to the left
                 // ADD: Button to re-check environment
+                if isEnvironmentValid == false {
+                    Button("Setup Environment") {
+                        setupPythonEnvironment()
+                    }
+                    .disabled(isSettingUpEnvironment) // Disable while setup is running
+                    .padding(.leading, 5)
+                }
+
                 Button {
                     checkPythonEnvironment()
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .help("Re-check Python Environment")
+                .disabled(isSettingUpEnvironment) // Disable while setup is running
             }
             .padding(.bottom, 5)
 
@@ -72,6 +80,7 @@ struct ContentView: View {
                     HStack {
                         Text("Python Path:")
                         TextField("e.g., /usr/bin/python3", text: $pythonPath)
+                            .disabled(isRunning || isSettingUpEnvironment) // ADD: Disable during setup
                     }
                 }
                 .padding(.vertical, 5)
@@ -91,7 +100,7 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             // CHANGE: Disable if environment isn't valid OR already running OR no input
-            .disabled(inputRepo.isEmpty || isRunning || isEnvironmentValid != true)
+            .disabled(inputRepo.isEmpty || isRunning || isEnvironmentValid != true || isSettingUpEnvironment) // ADD: Disable during setup
 
             GroupBox("Logs") {
                 TextEditor(text: $outputLog)
@@ -100,9 +109,31 @@ struct ContentView: View {
                     .border(Color.gray.opacity(0.5))
             }
 
+            Button {
+                // CHANGE: Use NSPasteboard for macOS
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString("pip install mlx mlx-lm", forType: .string)
+            } label: {
+                Label("Copy install command", systemImage: "doc.on.doc") // CHANGE: Text slightly
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .help("Click to copy 'pip install mlx mlx-lm' to clipboard") // CHANGE: Updated help
+
             Spacer()
         }
         .padding()
+        .overlay { // ADD: Overlay for setup progress
+            if isSettingUpEnvironment {
+                VStack {
+                    ProgressView("Setting up Python environment...")
+                        .padding()
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .shadow(radius: 5)
+                }
+            }
+        }
         .onAppear {
             // Run check when the view appears
             checkPythonEnvironment()
@@ -218,40 +249,38 @@ struct ContentView: View {
         }
     }
 
-    // ADD: Function to check Python environment
+    // CHANGE: Function to check Python environment with more detailed debugging
     func checkPythonEnvironment() {
         DispatchQueue.main.async {
-            self.isEnvironmentValid = nil // Reset status while checking
+            self.isEnvironmentValid = nil
             self.environmentStatusMessage = "Checking Python environment..."
         }
 
         let task = Process()
-        var checkArguments: [String]
-        let checkCommand = "-c" // Use -c to execute a command string
-        let importCheck = "import mlx_lm; print('mlx_lm found')" // Simple import check
+        let checkCommand = "-c"
+        // More detailed check that prints Python version and attempts import
+        let importCheck = """
+import sys
+print(f"Python Version: {sys.version}")
+try:
+    import mlx_lm
+    print("mlx_lm found")
+except ImportError as e:
+    print(f"Import Error: {str(e)}")
+"""
 
         if pythonPath == "/usr/bin/env" {
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            checkArguments = ["python3", checkCommand, importCheck]
+            task.executableURL = URL(fileURLWithPath: "/usr/local/bin/python3")
+            task.arguments = [checkCommand, importCheck]
         } else {
-            // Check if the custom path exists first
-            guard FileManager.default.fileExists(atPath: pythonPath) else {
-                DispatchQueue.main.async {
-                    self.environmentStatusMessage = "❌ Error: Specified Python path not found: \(self.pythonPath)"
-                    self.isEnvironmentValid = false
-                }
-                return
-            }
             task.executableURL = URL(fileURLWithPath: pythonPath)
-            checkArguments = [checkCommand, importCheck]
+            task.arguments = [checkCommand, importCheck]
         }
-
-        task.arguments = checkArguments
 
         let outputPipe = Pipe()
         let errorPipe = Pipe()
         task.standardOutput = outputPipe
-        task.standardError = errorPipe // Capture errors during check
+        task.standardError = errorPipe
 
         task.terminationHandler = { process in
             let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
@@ -261,17 +290,22 @@ struct ContentView: View {
 
             DispatchQueue.main.async {
                 if process.terminationStatus == 0 && outputString.contains("mlx_lm found") {
-                    self.environmentStatusMessage = "✅ Python environment OK (mlx-lm found using \(self.pythonPath == "/usr/bin/env" ? "python3 in PATH" : "custom path"))"
+                    self.environmentStatusMessage = "✅ Python environment OK (mlx-lm found)"
                     self.isEnvironmentValid = true
                 } else {
-                    var errorMessage = "❌ mlx-lm not found or Python error.\n"
-                    errorMessage += "   Attempted using: \(self.pythonPath == "/usr/bin/env" ? "python3 in PATH" : self.pythonPath)\n"
-                    if !errorString.isEmpty {
-                        errorMessage += "   Error Output: \(errorString.trimmingCharacters(in: .whitespacesAndNewlines))"
-                    } else if process.terminationStatus != 0 {
-                         errorMessage += "   Python process exited with status \(process.terminationStatus)."
+                    // CHANGE: Refine the error message and instructions
+                    var errorMessage = "❌ Python environment requires setup:\n"
+                    if !outputString.contains("mlx_lm found") && outputString.contains("Python Version:") {
+                         // Specifically mention missing packages if Python ran but import failed
+                         errorMessage += "   - 'mlx' or 'mlx_lm' package not found.\n"
                     }
-                    errorMessage += "\n   Please run 'pip install mlx-lm' in the correct environment, or specify the Python path in settings."
+                    if !outputString.isEmpty {
+                        errorMessage += "\nOutput:\n\(outputString.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+                    }
+                    if !errorString.isEmpty {
+                        errorMessage += "\nError Output:\n\(errorString.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+                    }
+                    errorMessage += "\nTo fix:\n1. Open Terminal.\n2. Activate the Python environment if needed (e.g., conda activate <env>).\n3. Run: pip install mlx mlx-lm (Use the button below to copy).\n4. Click the refresh button above."
                     self.environmentStatusMessage = errorMessage
                     self.isEnvironmentValid = false
                 }
@@ -281,12 +315,140 @@ struct ContentView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try task.run()
+                task.waitUntilExit()
             } catch {
                 DispatchQueue.main.async {
-                    self.environmentStatusMessage = "❌ Failed to run Python check: \(error.localizedDescription)"
+                    self.environmentStatusMessage = "❌ Failed to run Python: \(error.localizedDescription)"
                     self.isEnvironmentValid = false
                 }
             }
+        }
+    }
+
+    // ADD: Function to setup Python environment
+    func setupPythonEnvironment() {
+        let openPanel = NSOpenPanel()
+        openPanel.title = "Choose Directory for Virtual Environment"
+        openPanel.message = "Select a folder where the '.venv' directory will be created."
+        openPanel.showsHiddenFiles = false
+        openPanel.canChooseDirectories = true
+        openPanel.canChooseFiles = false
+        openPanel.canCreateDirectories = true
+        openPanel.allowsMultipleSelection = false
+
+        openPanel.begin { (result) -> Void in
+            if result == .OK, let url = openPanel.url {
+                let directoryPath = url.path
+                DispatchQueue.main.async {
+                    self.isSettingUpEnvironment = true
+                    self.outputLog = "Starting Python environment setup in: \(directoryPath)\n"
+                }
+                self.runSetupCommands(in: directoryPath)
+            }
+        }
+    }
+
+    // ADD: Helper to run the setup commands
+    func runSetupCommands(in directoryPath: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let basePythonPath = self.pythonPath // Use the python specified in the TextField to create the venv
+            let venvPath = "\(directoryPath)/.venv"
+            let venvPythonPath = "\(venvPath)/bin/python3"
+            var log = ""
+            var success = false
+
+            // --- 1. Create venv ---
+            log += "Attempting to create virtual environment using: \(basePythonPath)\n"
+            log += "Command: \(basePythonPath) -m venv \(venvPath)\n"
+            let createVenvResult = self.runShellCommand(executable: basePythonPath, arguments: ["-m", "venv", venvPath], currentDirectory: directoryPath)
+            log += createVenvResult.log
+
+            if createVenvResult.success {
+                log += "\nVirtual environment created.\n"
+                // --- 2. Install packages using venv's python ---
+                log += "\nAttempting to install packages using: \(venvPythonPath)\n"
+                log += "Command: \(venvPythonPath) -m pip install mlx mlx-lm\n"
+                let installResult = self.runShellCommand(executable: venvPythonPath, arguments: ["-m", "pip", "install", "mlx", "mlx-lm"], currentDirectory: directoryPath)
+                log += installResult.log
+
+                if installResult.success {
+                    log += "\nPackages installed successfully.\n"
+                    success = true
+                } else {
+                    log += "\nError installing packages.\n"
+                }
+            } else {
+                log += "\nError creating virtual environment. Make sure '\(basePythonPath)' is a valid Python executable.\n"
+            }
+
+            // --- 3. Update UI on Main Thread ---
+            DispatchQueue.main.async {
+                self.outputLog += log
+                if success {
+                    self.outputLog += "\nSetup complete! Updating Python path and re-checking environment.\n"
+                    self.pythonPath = venvPythonPath // Update the path in the UI
+                    self.checkPythonEnvironment() // Re-run the check
+                } else {
+                    self.outputLog += "\nEnvironment setup failed. Please check the logs and ensure your base Python path is correct.\n"
+                }
+                self.isSettingUpEnvironment = false
+            }
+        }
+    }
+
+    // ADD: Helper function to run a shell command and capture output
+    func runShellCommand(executable: String, arguments: [String], currentDirectory: String? = nil) -> (log: String, success: Bool) {
+        let task = Process()
+        var finalArguments = arguments // Use a mutable copy
+
+        // Check if the executable is /usr/bin/env
+        if executable == "/usr/bin/env" {
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            // Prepend 'python3' (or the appropriate command env should find)
+            finalArguments.insert("python3", at: 0)
+        } else {
+            // Handle direct path
+            guard FileManager.default.fileExists(atPath: executable) else {
+                return ("Error: Executable path does not exist: \(executable)", false)
+            }
+            task.executableURL = URL(fileURLWithPath: executable)
+        }
+
+        task.arguments = finalArguments // Assign the potentially modified arguments
+
+        if let currentDirectory {
+            task.currentDirectoryURL = URL(fileURLWithPath: currentDirectory)
+        }
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        task.standardOutput = outputPipe
+        task.standardError = errorPipe
+
+        var outputLog = ""
+
+        do {
+            // Log the actual command being executed
+            outputLog += "Running command: \(task.executableURL?.path ?? "unknown") \(finalArguments.joined(separator: " "))\n"
+            try task.run()
+
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+
+            if let output = String(data: outputData, encoding: .utf8), !output.isEmpty {
+                outputLog += "Output:\n\(output)\n"
+            }
+            if let error = String(data: errorData, encoding: .utf8), !error.isEmpty {
+                outputLog += "Error Output:\n\(error)\n"
+            }
+
+            task.waitUntilExit()
+            outputLog += "Process exited with status: \(task.terminationStatus)\n"
+            return (outputLog, task.terminationStatus == 0)
+
+        } catch {
+            outputLog += "Failed to run command: \(error.localizedDescription)\n"
+            return (outputLog, false)
         }
     }
 }
