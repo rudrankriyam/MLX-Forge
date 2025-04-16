@@ -13,38 +13,54 @@ class CommandManager: ObservableObject {
     @Published var isEnvironmentValid: Bool? = nil
     @Published var environmentStatusMessage = "Checking Python environment..."
     @Published var isSettingUpEnvironment = false
-    @Published var pythonPath: String = ""
+    @Published var pythonPath: String = "/usr/bin/python3" // Set default Python path
     @Published var inputRepo: String = ""
     @Published var outputRepo: String = ""
     @Published var quantizationLevel: QuantizationLevel = .none
-
+    
     private var currentTask: Process?
-
+    
+    init() {
+        // Try to find Python in common locations
+        let possiblePythonPaths = [
+            "/usr/bin/python3",
+            "/usr/local/bin/python3",
+            "/opt/homebrew/bin/python3"
+        ]
+        
+        for path in possiblePythonPaths {
+            if FileManager.default.fileExists(atPath: path) {
+                pythonPath = path
+                break
+            }
+        }
+    }
+    
     func buildArguments(pythonPath: String, inputRepo: String, outputRepo: String?, quantizationLevel: QuantizationLevel, upload: Bool) -> (executable: String, arguments: [String]) {
         var args = [String]()
         let effectivePythonPath = (pythonPath.isEmpty || pythonPath == "/usr/bin/env") ? "/usr/bin/env" : pythonPath
         _ = (effectivePythonPath == "/usr/bin/env") ? "python3" : effectivePythonPath
-
+        
         if effectivePythonPath == "/usr/bin/env" {
             args.append("python3") // Let /usr/bin/env find python3
         }
         args.append("-m")
         args.append("mlx_lm")
         args.append("convert")
-
+        
         args.append("--hf-path")
         args.append(inputRepo)
-
+        
         args.append(contentsOf: quantizationLevel.arguments)
-
+        
         if upload, let repo = outputRepo, !repo.isEmpty {
             args.append("--upload-repo")
             args.append(repo)
         }
-
+        
         return (effectivePythonPath, args)
     }
-
+    
     func runProcess(executablePath: String, arguments: [String], currentDirectory: String? = nil) async throws -> (success: Bool, output: String) {
         let task = Process()
         var processArguments = arguments
@@ -193,10 +209,22 @@ class CommandManager: ObservableObject {
         outputLog = "Starting Python environment setup in: \(directoryPath)\n"
         
         let venvPath = "\(directoryPath)/.venv"
+        
+        // Remove existing virtual environment if it exists
+        outputLog += "Cleaning up existing virtual environment...\n"
+        if FileManager.default.fileExists(atPath: venvPath) {
+            do {
+                try FileManager.default.removeItem(atPath: venvPath)
+                outputLog += "Removed existing virtual environment.\n"
+            } catch {
+                outputLog += "Warning: Failed to remove existing virtual environment: \(error.localizedDescription)\n"
+            }
+        }
+        
         let venvPythonPath = "\(venvPath)/bin/python3"
         
-        // Create virtual environment
-        outputLog += "Creating virtual environment...\n"
+        // Create fresh virtual environment
+        outputLog += "Creating new virtual environment...\n"
         let (venvSuccess, venvOutput) = try await runProcess(
             executablePath: basePythonPath,
             arguments: ["-m", "venv", venvPath],
@@ -205,6 +233,18 @@ class CommandManager: ObservableObject {
         
         guard venvSuccess else {
             throw CommandError.venvCreationFailed(output: venvOutput)
+        }
+        
+        // Upgrade pip first
+        outputLog += "Upgrading pip...\n"
+        let (pipUpgradeSuccess, pipUpgradeOutput) = try await runProcess(
+            executablePath: venvPythonPath,
+            arguments: ["-m", "pip", "install", "--upgrade", "pip"],
+            currentDirectory: directoryPath
+        )
+        
+        if !pipUpgradeSuccess {
+            outputLog += "Warning: Failed to upgrade pip: \(pipUpgradeOutput)\n"
         }
         
         // Install packages
@@ -234,7 +274,7 @@ class CommandManager: ObservableObject {
         openPanel.canChooseFiles = false
         openPanel.canCreateDirectories = true
         openPanel.allowsMultipleSelection = false
-
+        
         openPanel.begin { response in
             if response == .OK, let url = openPanel.url {
                 DispatchQueue.main.async {
@@ -254,7 +294,7 @@ class CommandManager: ObservableObject {
             }
         }
     }
-
+    
     // Parameterless environment check
     func checkPythonEnvironment() {
         checkPythonEnvironment(pythonPath: self.pythonPath)
