@@ -13,13 +13,17 @@ class CommandManager: ObservableObject {
     @Published var isEnvironmentValid: Bool? = nil
     @Published var environmentStatusMessage = "Checking Python environment..."
     @Published var isSettingUpEnvironment = false
+    @Published var pythonPath: String = ""
+    @Published var inputRepo: String = ""
+    @Published var outputRepo: String = ""
+    @Published var quantizationLevel: QuantizationLevel = .none
 
     private var currentTask: Process?
 
     func buildArguments(pythonPath: String, inputRepo: String, outputRepo: String?, quantizationLevel: QuantizationLevel, upload: Bool) -> (executable: String, arguments: [String]) {
         var args = [String]()
         let effectivePythonPath = (pythonPath.isEmpty || pythonPath == "/usr/bin/env") ? "/usr/bin/env" : pythonPath
-        let pythonExecutable = (effectivePythonPath == "/usr/bin/env") ? "python3" : effectivePythonPath
+        _ = (effectivePythonPath == "/usr/bin/env") ? "python3" : effectivePythonPath
 
         if effectivePythonPath == "/usr/bin/env" {
             args.append("python3") // Let /usr/bin/env find python3
@@ -218,6 +222,42 @@ class CommandManager: ObservableObject {
         outputLog += "\nSetup complete! Please update the Python Path to: \(venvPythonPath)"
         isSettingUpEnvironment = false
         checkPythonEnvironment(pythonPath: venvPythonPath)
+    }
+    
+    // UI entrypoint: show directory picker and dispatch async setup
+    func setupPythonEnvironment() {
+        let openPanel = NSOpenPanel()
+        openPanel.title = "Choose Directory for Virtual Environment"
+        openPanel.message = "Select a folder where the '.venv' directory will be created."
+        openPanel.showsHiddenFiles = false
+        openPanel.canChooseDirectories = true
+        openPanel.canChooseFiles = false
+        openPanel.canCreateDirectories = true
+        openPanel.allowsMultipleSelection = false
+
+        openPanel.begin { response in
+            if response == .OK, let url = openPanel.url {
+                DispatchQueue.main.async {
+                    self.isSettingUpEnvironment = true
+                    self.outputLog = "Starting Python environment setup in: \(url.path)\n"
+                }
+                Task {
+                    do {
+                        try await self.setupPythonEnvironment(basePythonPath: self.pythonPath, directoryPath: url.path)
+                    } catch {
+                        DispatchQueue.main.async {
+                            self.outputLog += "\n\nError: \(error.localizedDescription)"
+                            self.isSettingUpEnvironment = false
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Parameterless environment check
+    func checkPythonEnvironment() {
+        checkPythonEnvironment(pythonPath: self.pythonPath)
     }
 }
 
