@@ -3,9 +3,6 @@ import Foundation
 import Combine
 import AppKit
 
-// Keep QuantizationLevel here or move it if preferred
-// enum QuantizationLevel: String, CaseIterable, Identifiable { ... }
-
 @MainActor
 class CommandManager: ObservableObject {
     @Published var outputLog = "Process output will appear here..."
@@ -259,7 +256,12 @@ class CommandManager: ObservableObject {
             throw CommandError.packageInstallationFailed(output: installOutput)
         }
         
-        outputLog += "\nSetup complete! Please update the Python Path to: \(venvPythonPath)"
+        // Automatically update the pythonPath
+        await MainActor.run {
+            self.pythonPath = venvPythonPath
+        }
+        
+        outputLog += "\nSetup complete! Python path has been automatically updated to: \(venvPythonPath)"
         isSettingUpEnvironment = false
         checkPythonEnvironment(pythonPath: venvPythonPath)
     }
